@@ -1,4 +1,5 @@
 import uuid
+from datetime import datetime, timezone
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -40,10 +41,21 @@ async def start_crawl(
     await db.refresh(crawl)
 
     # Dispatch Celery task
-    task = run_crawl.apply_async(
-        args=[str(crawl.id), str(project.id), str(org.id)],
-        queue="crawls",
-    )
+    try:
+        task = run_crawl.apply_async(
+            args=[str(crawl.id), str(project.id), str(org.id)],
+            queue="crawls",
+        )
+    except Exception as exc:
+        # Do not leave an orphaned PENDING row when Redis/broker dispatch fails.
+        crawl.status = CrawlStatus.FAILED
+        crawl.completed_at = datetime.now(timezone.utc)
+        await db.commit()
+        raise HTTPException(
+            status_code=503,
+            detail="The crawl could not be queued. Please check that the worker and Redis services are running, then retry.",
+        ) from exc
+
     crawl.celery_task_id = task.id
     await db.commit()
 
