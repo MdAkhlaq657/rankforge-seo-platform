@@ -61,7 +61,9 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    command: celery -A app.workers.celery_app worker --loglevel=info --concurrency=4 -Q crawls,audits,default
+    # Use a single-process pool for the local Docker development stack.
+    # This avoids forking SQLAlchemy's async engine/asyncpg connection pool.
+    command: celery -A app.workers.celery_app worker --loglevel=info --pool=solo --concurrency=1 -Q crawls,audits,default
 
   beat:
     build:
