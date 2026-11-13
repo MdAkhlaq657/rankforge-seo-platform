@@ -49,8 +49,36 @@ def run_async(coro):
     soft_time_limit=3600,
 )
 def run_crawl(self, crawl_id: str, project_id: str, org_id: str):
-    """Main crawl task. Runs BFS crawl of the project domain."""
-    return run_async(_run_crawl_async(crawl_id, project_id, org_id, self))
+    """Main crawl task. Runs BFS crawl and records failures at every stage."""
+    try:
+        return run_async(_run_crawl_async(crawl_id, project_id, org_id, self))
+    except Exception as exc:
+        # The crawl can fail before _run_crawl_async reaches its own crawl
+        # loop (for example, while loading the project or marking it running).
+        # Use a fresh session so a failed/aborted transaction cannot leave the
+        # database row permanently pending.
+        logger.exception("Crawl task crashed", crawl_id=crawl_id, error=str(exc))
+        try:
+            run_async(_mark_crawl_failed(crawl_id))
+        except Exception as status_exc:
+            logger.exception(
+                "Could not persist failed crawl status",
+                crawl_id=crawl_id,
+                error=str(status_exc),
+            )
+        raise
+
+
+async def _mark_crawl_failed(crawl_id: str):
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(Crawl).where(Crawl.id == uuid.UUID(crawl_id))
+        )
+        crawl = result.scalar_one_or_none()
+        if crawl and crawl.status not in (CrawlStatus.COMPLETED, CrawlStatus.CANCELLED):
+            crawl.status = CrawlStatus.FAILED
+            crawl.completed_at = datetime.now(timezone.utc)
+            await db.commit()
 
 
 async def _run_crawl_async(crawl_id: str, project_id: str, org_id: str, task):
