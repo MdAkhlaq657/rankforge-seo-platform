@@ -126,11 +126,21 @@ def _mock_cwv(url: str) -> dict:
     }
 
 
-def _has_poor_cwv(cwv: dict) -> bool:
+def _has_poor_cwv(page_data: dict) -> bool:
+    """Return True only when an available mobile CWV metric exceeds its threshold."""
+    lcp = page_data.get("lcp_mobile")
+    cls = page_data.get("cls_mobile")
+    inp = page_data.get("inp_mobile")
+
     return (
-        cwv["lcp_mobile"] > CWV_THRESHOLDS["lcp"]["needs_improvement"]
-        or cwv["cls_mobile"] > CWV_THRESHOLDS["cls"]["needs_improvement"]
-        or cwv["inp_mobile"] > CWV_THRESHOLDS["inp"]["needs_improvement"]
+        (isinstance(lcp, (int, float)) and
+         lcp > CWV_THRESHOLDS["lcp"]["needs_improvement"])
+        or
+        (isinstance(cls, (int, float)) and
+         cls > CWV_THRESHOLDS["cls"]["needs_improvement"])
+        or
+        (isinstance(inp, (int, float)) and
+         inp > CWV_THRESHOLDS["inp"]["needs_improvement"])
     )
 
 
@@ -152,7 +162,12 @@ async def crawl_page(client: httpx.AsyncClient, url: str, base_domain: str, dept
             "discovered_urls": [],
         }
 
-        if status_code != 200 or "text/html" not in response.headers.get("content-type", ""):
+        content_type = response.headers.get("content-type", "").lower()
+        page_data["is_html"] = (
+            "text/html" in content_type
+            or "application/xhtml+xml" in content_type
+        )
+        if status_code != 200 or not page_data["is_html"]:
             return page_data
 
         soup = BeautifulSoup(response.text, "lxml")
@@ -228,7 +243,7 @@ async def crawl_page(client: httpx.AsyncClient, url: str, base_domain: str, dept
         return {"url": url, "status_code": None, "error": str(e), "page_depth": depth, "discovered_urls": []}
 
 
-def detect_issues(page_data: dict, all_titles: set[str]) -> list[dict]:
+def detect_issues(page_data: dict, title_counts: dict[str, int]) -> list[dict]:
     """Detect SEO issues from crawled page data. Returns list of issue dicts."""
     issues = []
     status = page_data.get("status_code")
@@ -240,7 +255,7 @@ def detect_issues(page_data: dict, all_titles: set[str]) -> list[dict]:
                        "meta": {"status_code": status}})
         return issues  # No point checking on-page for error pages
 
-    if status != 200:
+    if status != 200 or page_data.get("is_html") is False:
         return issues
 
     # Title issues
@@ -248,7 +263,7 @@ def detect_issues(page_data: dict, all_titles: set[str]) -> list[dict]:
     if not title:
         defn = ISSUE_DEFINITIONS[IssueType.MISSING_TITLE]
         issues.append({**defn, "issue_type": IssueType.MISSING_TITLE, "meta": {}})
-    elif title in all_titles:
+    elif title.strip().casefold() and title_counts.get(title.strip().casefold(), 0) > 1:
         defn = ISSUE_DEFINITIONS[IssueType.DUPLICATE_TITLE]
         issues.append({**defn, "issue_type": IssueType.DUPLICATE_TITLE, "meta": {"title": title}})
 
