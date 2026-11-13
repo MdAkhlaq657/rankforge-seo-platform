@@ -1,7 +1,7 @@
 import asyncio
 import uuid
 from datetime import datetime, timezone
-from collections import deque
+from collections import Counter, deque
 from typing import Optional
 import httpx
 import structlog
@@ -75,7 +75,6 @@ async def _run_crawl_async(crawl_id: str, project_id: str, org_id: str, task):
         visited = set()
         queue = deque([(start_url, 0)])  # (url, depth)
         all_page_data = []
-        all_titles = set()
 
         try:
             async with httpx.AsyncClient(
@@ -103,10 +102,6 @@ async def _run_crawl_async(crawl_id: str, project_id: str, org_id: str, task):
                     page_data["url"] = clean_url
                     all_page_data.append(page_data)
 
-                    # Track titles for duplicate detection
-                    if page_data.get("title"):
-                        all_titles.add(page_data["title"])
-
                     # Persist page to DB
                     page_id = await _save_page(db, page_data, crawl, project)
 
@@ -120,10 +115,17 @@ async def _run_crawl_async(crawl_id: str, project_id: str, org_id: str, task):
                     # Rate limiting
                     await asyncio.sleep(0.3)
 
-            # Run audit pass with full title set
+            # Count normalized titles across all crawled pages before auditing.
+            title_counts = Counter(
+                page["title"].strip().casefold()
+                for page in all_page_data
+                if page.get("title") and page["title"].strip()
+            )
+
+            # Run audit pass with complete title counts.
             total_issues = 0
             for page_data in all_page_data:
-                issues = detect_issues(page_data, all_titles)
+                issues = detect_issues(page_data, title_counts)
                 for issue_def in issues:
                     await _save_issue_and_task(db, issue_def, page_data, crawl, project, db)
                     total_issues += 1
