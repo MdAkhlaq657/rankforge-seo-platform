@@ -21,14 +21,24 @@ import tldextract
 logger = structlog.get_logger()
 
 
+# SQLAlchemy's async connection pool is bound to the event loop that created
+# each connection. Celery's prefork worker process can execute many tasks, so
+# creating and closing a loop for every task can make a pooled asyncpg
+# connection get reused from a different loop on the next task.
+_worker_loop = None
+
+
 def run_async(coro):
-    """Run async coroutine in Celery worker context."""
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        return loop.run_until_complete(coro)
-    finally:
-        loop.close()
+    """Run async work on one persistent event loop per Celery worker process."""
+    global _worker_loop
+
+    if _worker_loop is None or _worker_loop.is_closed():
+        # Created lazily inside the worker child process, not in the parent
+        # process before Celery forks its worker pool.
+        _worker_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(_worker_loop)
+
+    return _worker_loop.run_until_complete(coro)
 
 
 @celery_app.task(
